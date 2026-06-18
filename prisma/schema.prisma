@@ -1,0 +1,213 @@
+// Generalized schema — serves ANY business case (Playbook) and ANY channel.
+// See PLAN.md §4. SQLite-incompatible features (Json, enums) target Postgres.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Playbook = a business case (config + which plugins to run). See PLAN.md §2.1.
+// ---------------------------------------------------------------------------
+model Playbook {
+  key       String     @id // "website-sales", "pos-systems", ...
+  name      String
+  version   Int        @default(1)
+  config    Json // discovery/analyzers/scoring/qualification/sequence/personalization
+  createdAt DateTime   @default(now())
+  campaigns Campaign[]
+  templates Template[]
+}
+
+model Campaign {
+  id          String         @id @default(cuid())
+  playbookKey String
+  playbook    Playbook       @relation(fields: [playbookKey], references: [key])
+  name        String
+  // Discovery parameters (geo + vertical), interpolated into queryTemplates.
+  params      Json // { businessType, city, state, country, ... }
+  status      CampaignStatus @default(DRAFT)
+  createdAt   DateTime       @default(now())
+  leads       Lead[]
+}
+
+enum CampaignStatus {
+  DRAFT
+  RUNNING
+  PAUSED
+  ARCHIVED
+}
+
+// ---------------------------------------------------------------------------
+// Lead — identity columns + generic attributes JSON for case-specific fields.
+// ---------------------------------------------------------------------------
+model Lead {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id])
+
+  businessName String
+  website      String?
+  email        String?
+  phone        String?
+  address      String?
+  category     String?
+
+  // Dedupe keys (normalized) — unique within a campaign.
+  domainKey String?
+  phoneKey  String?
+
+  // Case-specific fields a playbook needs but the engine doesn't model.
+  attributes Json @default("{}")
+
+  status   LeadStatus @default(NOT_CONTACTED)
+  insights LeadInsight[]
+  score    LeadScore?
+  sequence Sequence?
+  replies  Reply[]
+  createdAt DateTime @default(now())
+
+  @@unique([campaignId, domainKey])
+  @@unique([campaignId, phoneKey])
+  @@index([campaignId, status])
+}
+
+enum LeadStatus {
+  NOT_CONTACTED
+  CONTACTED
+  OPENED
+  CLICKED
+  REPLIED
+  INTERESTED
+  NOT_INTERESTED
+  UNSUBSCRIBED
+  BOUNCED
+  CLOSED
+}
+
+// One row per Analyzer per Lead — typed result lives in JSON.
+model LeadInsight {
+  id          String   @id @default(cuid())
+  leadId      String
+  lead        Lead     @relation(fields: [leadId], references: [id])
+  analyzerKey String // "website", "review-volume", ...
+  result      Json
+  createdAt   DateTime @default(now())
+
+  @@unique([leadId, analyzerKey])
+}
+
+model LeadScore {
+  leadId    String   @id
+  lead      Lead     @relation(fields: [leadId], references: [id])
+  score     Int
+  band      String // "P1" | "P2" | "P3" | "EXCLUDE"
+  trace     Json // which rules fired and their contribution
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Channels & templates — outreach is channel-agnostic. See PLAN.md §2.2.
+// ---------------------------------------------------------------------------
+model Channel {
+  key          String   @id // "email" | "whatsapp" | "sms" | "linkedin"
+  enabled      Boolean  @default(true)
+  config       Json     @default("{}") // provider config; credentials by ref/env
+  createdAt    DateTime @default(now())
+}
+
+model Template {
+  id          String   @id @default(cuid())
+  playbookKey String
+  playbook    Playbook @relation(fields: [playbookKey], references: [key])
+  channelKey  String // which channel this template renders for
+  templateKey String // referenced by TouchDef.templateKey
+  subject     String? // email only
+  body        String // email HTML, or WhatsApp template name/params
+  createdAt   DateTime @default(now())
+
+  @@unique([playbookKey, channelKey, templateKey])
+}
+
+// ---------------------------------------------------------------------------
+// Sequence — the touch plan instance per lead.
+// ---------------------------------------------------------------------------
+model Sequence {
+  id        String         @id @default(cuid())
+  leadId    String         @unique
+  lead      Lead           @relation(fields: [leadId], references: [id])
+  status    SequenceStatus @default(ACTIVE)
+  steps     SequenceStep[]
+  createdAt DateTime       @default(now())
+}
+
+enum SequenceStatus {
+  ACTIVE
+  STOPPED
+  COMPLETED
+}
+
+model SequenceStep {
+  id            String     @id @default(cuid())
+  sequenceId    String
+  sequence      Sequence   @relation(fields: [sequenceId], references: [id])
+  day           Int
+  channelKey    String
+  templateKey   String
+  scheduledFor  DateTime
+  status        StepStatus @default(PENDING)
+  outbound      OutboundMessage?
+}
+
+enum StepStatus {
+  PENDING
+  SENT
+  SKIPPED
+  CANCELLED
+}
+
+// Channel-agnostic send record.
+model OutboundMessage {
+  id                String       @id @default(cuid())
+  stepId            String       @unique
+  step              SequenceStep @relation(fields: [stepId], references: [id])
+  channelKey        String
+  providerMessageId String? // Resend id, WhatsApp wamid, etc.
+  status            String // "sent" | "delivered" | "failed"
+  sentAt            DateTime     @default(now())
+  events            EngagementEvent[]
+}
+
+// Channel-agnostic engagement (opens/clicks/bounces/delivered).
+model EngagementEvent {
+  id         String          @id @default(cuid())
+  outboundId String
+  outbound   OutboundMessage @relation(fields: [outboundId], references: [id])
+  channelKey String
+  type       String // "opened" | "clicked" | "bounced" | "delivered" | ...
+  payload    Json            @default("{}")
+  occurredAt DateTime        @default(now())
+}
+
+model Reply {
+  id         String   @id @default(cuid())
+  leadId     String
+  lead       Lead     @relation(fields: [leadId], references: [id])
+  channelKey String
+  body       String
+  intent     String? // "interested" | "not_interested" | "unsubscribe" | parsed by AI
+  receivedAt DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actor     String
+  action    String
+  target    String?
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now())
+}
