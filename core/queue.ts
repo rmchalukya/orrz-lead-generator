@@ -10,6 +10,9 @@ export async function getBoss(): Promise<PgBoss> {
     process.env.PGBOSS_DATABASE_URL || process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is required for pg-boss");
   boss = new PgBoss({ connectionString });
+  // Without an 'error' listener, a transient DB error event crashes the process
+  // (Node throws on unhandled 'error'). Log instead so the worker keeps running.
+  boss.on("error", (err) => console.error("[pg-boss] error:", err));
   await boss.start();
   // pg-boss v10 requires queues to exist before send/work. Idempotent.
   for (const name of Object.values(JOBS)) await boss.createQueue(name);
