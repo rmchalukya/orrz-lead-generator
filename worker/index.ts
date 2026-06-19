@@ -8,6 +8,7 @@ import "../core/env.js"; // resolve DATABASE_URL from INIT_COMMON_MASTER_* if ne
 import http from "node:http";
 import { getBoss } from "../core/queue.js";
 import { registerWorkers } from "../core/pipeline.js";
+import { seedTemplates } from "../core/seed.js";
 
 let dbConnected = false;
 
@@ -25,6 +26,8 @@ async function main() {
   startHealthServer(); // up immediately, before the DB connects
   const boss = await getBoss();
   await registerWorkers(boss);
+  const n = await seedTemplates();
+  console.log(`[worker] seeded ${n} email templates`);
   dbConnected = true;
   console.log("[worker] pipeline workers registered, draining queue…");
 }
