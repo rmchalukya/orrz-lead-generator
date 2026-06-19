@@ -23,6 +23,7 @@ export async function createCampaign(formData: FormData) {
     state: String(formData.get("state") || "").trim(),
     country: String(formData.get("country") || "").trim(),
     areas, // each becomes its own Google query — more areas = more leads
+    aiAreas: formData.get("aiAreas") === "on", // let AI enumerate the city's localities
     maxLeads: Math.max(1, Math.min(60, Number(formData.get("maxLeads") || 60))), // per query
     recurring: formData.get("recurring") === "on", // re-scan every 24h
     liveSend: formData.get("liveSend") === "on", // unchecked = safe (no real sends)

@@ -54,6 +54,10 @@ export default async function Home() {
             search, so more areas = more leads
             <textarea name="areas" rows={4} placeholder={"Sector 18\nSector 62\nGreater Noida\nIndirapuram"} />
           </label>
+          <label className="wide checkbox">
+            <input type="checkbox" name="aiAreas" />
+            <span>Let AI find localities for this city (Claude enumerates neighbourhoods to search — adds to any you typed above).</span>
+          </label>
           <label className="wide">
             Campaign name (optional)
             <input name="name" placeholder="Dentists in Mumbai" />

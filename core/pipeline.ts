@@ -12,6 +12,7 @@ import { personalize } from "./personalize.js";
 import { getChannel } from "./channels/index.js";
 import { pickSenderName, senderLinksHtml } from "./sender.js";
 import { discoverEmail } from "./enrich.js";
+import { planAreas } from "./queryplanner.js";
 
 const normDomain = (url?: string | null) =>
   url ? url.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0].toLowerCase() : null;
@@ -44,6 +45,32 @@ function buildQueries(params: Record<string, unknown>): string[] {
 // advances itself one query at a time so a campaign works through its whole input
 // list continuously, and can re-scan on a schedule.
 async function discover(boss: PgBoss, campaignId: string) {
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
+  if (!campaign) return;
+  const params = campaign.params as Record<string, unknown>;
+
+  // AI area expansion (once per campaign): Claude enumerates the city's localities,
+  // each of which becomes its own Google query — far deeper coverage than one search.
+  if (params.aiAreas === true && params.areasGenerated !== true) {
+    try {
+      const ai = await planAreas({
+        businessType: String(params.businessType ?? ""),
+        city: String(params.city ?? ""),
+        state: String(params.state ?? ""),
+        country: String(params.country ?? ""),
+      });
+      const manual = Array.isArray(params.areas) ? (params.areas as unknown[]).map(String) : [];
+      const areas = [...new Set([...manual, ...ai].map((s) => s.trim()).filter(Boolean))];
+      await prisma.campaign.update({
+        where: { id: campaignId },
+        data: { params: { ...params, areas, areasGenerated: true } as Prisma.InputJsonValue },
+      });
+      console.log(`[discover] ${campaignId} AI expanded to ${areas.length} areas`);
+    } catch (e) {
+      console.error(`[discover] ${campaignId} AI area planning failed:`, e);
+    }
+  }
+
   await boss.send(JOBS.discoverQuery, { campaignId, index: 0 });
 }
 
@@ -222,7 +249,7 @@ async function buildSequence(boss: PgBoss, leadId: string) {
   }
 }
 
-async function sendTouch(_boss: PgBoss, stepId: string) {
+async function sendTouch(boss: PgBoss, stepId: string) {
   const step = await prisma.sequenceStep.findUniqueOrThrow({
     where: { id: stepId },
     include: { sequence: { include: { lead: { include: { campaign: true } } } } },
@@ -243,6 +270,41 @@ async function sendTouch(_boss: PgBoss, stepId: string) {
   if (!liveSend) {
     await prisma.sequenceStep.update({ where: { id: stepId }, data: { status: "SKIPPED" } });
     return;
+  }
+
+  // No email to send to → skip (don't consume a throttle slot).
+  if (!lead.email) {
+    await prisma.sequenceStep.update({ where: { id: stepId }, data: { status: "SKIPPED" } });
+    return;
+  }
+
+  // Slow, paced sending to protect domain reputation: global daily cap + spacing
+  // between sends. Over the limit / too soon → reschedule this step, don't send now.
+  const intervalSec = Number(process.env.SEND_INTERVAL_SECONDS) || 180;
+  const dailyCap = Number(process.env.SEND_DAILY_CAP) || 40;
+  const dayStart = new Date();
+  dayStart.setUTCHours(0, 0, 0, 0);
+
+  const sentToday = await prisma.outboundMessage.count({
+    where: { status: "sent", sentAt: { gte: dayStart } },
+  });
+  if (sentToday >= dailyCap) {
+    const secsToTomorrow = Math.ceil((dayStart.getTime() + 86_400_000 - Date.now()) / 1000);
+    await boss.send(JOBS.sendTouch, { stepId }, { startAfter: Math.max(60, secsToTomorrow) });
+    return;
+  }
+
+  const last = await prisma.outboundMessage.findFirst({
+    where: { status: "sent" },
+    orderBy: { sentAt: "desc" },
+    select: { sentAt: true },
+  });
+  if (last) {
+    const waitSec = Math.ceil((last.sentAt.getTime() + intervalSec * 1000 - Date.now()) / 1000);
+    if (waitSec > 0) {
+      await boss.send(JOBS.sendTouch, { stepId }, { startAfter: waitSec });
+      return;
+    }
   }
 
   const channel = getChannel(step.channelKey);
@@ -330,6 +392,7 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   await boss.work<{ leadId: string }>(JOBS.personalize, batch, parallel((d) => personalizeStep(boss, d.leadId)));
   await boss.work<{ leadId: string }>(JOBS.buildSequence, batch, parallel((d) => buildSequence(boss, d.leadId)));
 
-  // Sends: modest concurrency to avoid bursting the email provider / hurting deliverability.
-  await boss.work<{ stepId: string }>(JOBS.sendTouch, { batchSize: 5 }, parallel((d) => sendTouch(boss, d.stepId)));
+  // Sends: serial (batchSize 1) so the global spacing/daily-cap throttle is accurate
+  // and emails trickle out slowly to protect domain reputation.
+  await boss.work<{ stepId: string }>(JOBS.sendTouch, { batchSize: 1 }, parallel((d) => sendTouch(boss, d.stepId)));
 }
