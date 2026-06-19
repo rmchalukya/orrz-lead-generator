@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "../../../core/db.js";
-import { runCampaign, setCampaignStatus } from "../../actions.js";
+import { runCampaign, setCampaignStatus, setLiveSend } from "../../actions.js";
 
 export const dynamic = "force-dynamic";
 
@@ -16,8 +16,10 @@ export default async function CampaignDetail({ params }: { params: Promise<{ id:
   if (!campaign) notFound();
 
   const p = campaign.params as Record<string, unknown>;
+  const liveSend = p.liveSend === true;
   const leads = [...campaign.leads].sort((a, b) => (b.score?.score ?? -1) - (a.score?.score ?? -1));
   const qualified = leads.filter((l) => l.score && l.score.band !== "EXCLUDE").length;
+  const withEmail = leads.filter((l) => l.email).length;
 
   return (
     <main>
@@ -51,8 +53,26 @@ export default async function CampaignDetail({ params }: { params: Promise<{ id:
         <Link className="muted" href={`/campaigns/${campaign.id}`}>↻ Refresh</Link>
       </div>
 
+      <div className="actions">
+        <span className={`badge ${liveSend ? "running" : "archived"}`}>
+          Live sending: {liveSend ? "ON" : "OFF"}
+        </span>
+        <form action={setLiveSend}>
+          <input type="hidden" name="id" value={campaign.id} />
+          <input type="hidden" name="on" value={liveSend ? "false" : "true"} />
+          <button type="submit" className="secondary">
+            {liveSend ? "Turn off sending" : "Enable live sending"}
+          </button>
+        </form>
+        {!liveSend && (
+          <span className="muted">
+            Sends are skipped while off. Enable this <b>before</b> running if you want touch #1 to go out.
+          </span>
+        )}
+      </div>
+
       <p className="muted">
-        {leads.length} leads discovered · {qualified} qualified
+        {leads.length} leads discovered · {qualified} qualified · {withEmail} with email
       </p>
 
       {leads.length === 0 ? (
@@ -62,6 +82,7 @@ export default async function CampaignDetail({ params }: { params: Promise<{ id:
           <thead>
             <tr>
               <th>Business</th>
+              <th>Email</th>
               <th>Site</th>
               <th>Lead</th>
               <th>Band</th>
@@ -87,6 +108,7 @@ export default async function CampaignDetail({ params }: { params: Promise<{ id:
                       </>
                     ) : null}
                   </td>
+                  <td className="muted">{l.email ?? "—"}</td>
                   <td>{web?.score ?? "—"}</td>
                   <td>{l.score?.score ?? "—"}</td>
                   <td>

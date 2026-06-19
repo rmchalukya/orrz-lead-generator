@@ -18,6 +18,7 @@ export async function createCampaign(formData: FormData) {
     state: String(formData.get("state") || "").trim(),
     country: String(formData.get("country") || "").trim(),
     maxLeads: Math.max(1, Math.min(200, Number(formData.get("maxLeads") || 25))),
+    liveSend: formData.get("liveSend") === "on", // unchecked = safe (no real sends)
   };
   const name = String(formData.get("name") || `${params.businessType} in ${params.city}`).trim();
 
@@ -41,6 +42,19 @@ export async function runCampaign(formData: FormData) {
   await prisma.campaign.update({ where: { id }, data: { status: "RUNNING" } });
   const boss = await getBoss();
   await boss.send(JOBS.discover, { campaignId: id });
+  revalidatePath(`/campaigns/${id}`);
+}
+
+// Toggle live email sending for a campaign (stored in params.liveSend).
+export async function setLiveSend(formData: FormData) {
+  const id = String(formData.get("id"));
+  const on = String(formData.get("on")) === "true";
+  const c = await prisma.campaign.findUniqueOrThrow({ where: { id } });
+  const params = { ...(c.params as object), liveSend: on };
+  await prisma.campaign.update({
+    where: { id },
+    data: { params: params as Prisma.InputJsonValue },
+  });
   revalidatePath(`/campaigns/${id}`);
 }
 

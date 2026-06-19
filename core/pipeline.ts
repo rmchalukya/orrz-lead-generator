@@ -11,6 +11,7 @@ import { buildContext, score } from "./scoring.js";
 import { personalize } from "./personalize.js";
 import { getChannel } from "./channels/index.js";
 import { pickSenderName, senderLinksHtml } from "./sender.js";
+import { discoverEmail } from "./enrich.js";
 
 const normDomain = (url?: string | null) =>
   url ? url.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0].toLowerCase() : null;
@@ -90,6 +91,13 @@ async function analyze(boss: PgBoss, leadId: string) {
       update: { result: result as unknown as Prisma.InputJsonValue },
     });
   }
+
+  // Email enrichment: Places gives no email, so scrape the site for one.
+  if (!lead.email && lead.website) {
+    const email = await discoverEmail(lead.website);
+    if (email) await prisma.lead.update({ where: { id: leadId }, data: { email } });
+  }
+
   await boss.send(JOBS.score, { leadId });
 }
 
@@ -186,6 +194,14 @@ async function sendTouch(_boss: PgBoss, stepId: string) {
   const stopped = ["REPLIED", "UNSUBSCRIBED", "BOUNCED", "INTERESTED", "NOT_INTERESTED"].includes(lead.status);
   if (stopped || step.sequence.status !== "ACTIVE") {
     await prisma.sequenceStep.update({ where: { id: stepId }, data: { status: "CANCELLED" } });
+    return;
+  }
+
+  // Live-send gate: nothing goes out unless the campaign has live sending enabled.
+  // Safe by default — discovery/scoring/personalization still run, sends are skipped.
+  const liveSend = (lead.campaign.params as { liveSend?: boolean }).liveSend === true;
+  if (!liveSend) {
+    await prisma.sequenceStep.update({ where: { id: stepId }, data: { status: "SKIPPED" } });
     return;
   }
 

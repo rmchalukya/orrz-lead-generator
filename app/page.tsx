@@ -53,6 +53,13 @@ export default async function Home() {
             Campaign name (optional)
             <input name="name" placeholder="Dentists in Mumbai" />
           </label>
+          <label className="wide checkbox">
+            <input type="checkbox" name="liveSend" />
+            <span>
+              Send emails live (off = discover, analyze & personalize only — no emails sent).
+              Leave off until you're ready for real outreach.
+            </span>
+          </label>
           <div className="wide">
             <button type="submit">Create campaign</button>
           </div>
