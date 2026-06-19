@@ -46,12 +46,21 @@ export default async function Home() {
             <input name="country" placeholder="India" defaultValue="India" />
           </label>
           <label>
-            Max leads
-            <input name="maxLeads" type="number" min={1} max={200} defaultValue={25} />
+            Max per query
+            <input name="maxLeads" type="number" min={1} max={60} defaultValue={60} />
+          </label>
+          <label className="wide">
+            Areas / localities (optional, one per line) — each becomes its own Google
+            search, so more areas = more leads
+            <textarea name="areas" rows={4} placeholder={"Sector 18\nSector 62\nGreater Noida\nIndirapuram"} />
           </label>
           <label className="wide">
             Campaign name (optional)
             <input name="name" placeholder="Dentists in Mumbai" />
+          </label>
+          <label className="wide checkbox">
+            <input type="checkbox" name="recurring" />
+            <span>Keep re-scanning every 24h (continuous lead fetching until you pause).</span>
           </label>
           <label className="wide checkbox">
             <input type="checkbox" name="liveSend" />

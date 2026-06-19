@@ -17,61 +17,101 @@ const normDomain = (url?: string | null) =>
   url ? url.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0].toLowerCase() : null;
 const normPhone = (p?: string | null) => (p ? p.replace(/\D/g, "") : null);
 
-function interpolate(tpl: string, params: Record<string, unknown>): string {
-  return tpl.replace(/\{(\w+)\}/g, (_, k) => String(params[k] ?? ""));
+// Expand campaign inputs into a list of Google text queries. A city query plus one
+// per area/locality the user fed in — each query pulls its own ~60 results, so more
+// areas = more leads (dedup handles overlap).
+function buildQueries(params: Record<string, unknown>): string[] {
+  const businessType = String(params.businessType ?? "").trim();
+  if (!businessType) return [];
+  const city = String(params.city ?? "").trim();
+  const state = String(params.state ?? "").trim();
+  const country = String(params.country ?? "").trim();
+  const areas = Array.isArray(params.areas) ? (params.areas as unknown[]).map(String) : [];
+
+  const out: string[] = [];
+  const cityLoc = [city, state, country].filter(Boolean).join(", ");
+  if (cityLoc) out.push(`${businessType} in ${cityLoc}`);
+  for (const a of areas) {
+    const area = a.trim();
+    if (area) out.push(`${businessType} in ${area}${city ? `, ${city}` : ""}`);
+  }
+  return [...new Set(out)];
 }
 
 // --- Step handlers --------------------------------------------------------
 
+// Entry point: kick off the query chain at index 0. The chain (discoverQuery)
+// advances itself one query at a time so a campaign works through its whole input
+// list continuously, and can re-scan on a schedule.
 async function discover(boss: PgBoss, campaignId: string) {
-  const campaign = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId } });
+  await boss.send(JOBS.discoverQuery, { campaignId, index: 0 });
+}
+
+// Process ONE query, then enqueue the next. Stops when the campaign is paused or the
+// query list is exhausted. If params.recurring, schedules a fresh scan in 24h.
+async function discoverQuery(boss: PgBoss, campaignId: string, index: number) {
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
+  if (!campaign || campaign.status !== "RUNNING") {
+    console.log(`[discover] ${campaignId} not running — stopping chain at q${index}`);
+    return;
+  }
   const pb = getPlaybook(campaign.playbookKey);
   const params = campaign.params as Record<string, unknown>;
-  const maxLeads = typeof params.maxLeads === "number" ? params.maxLeads : 200;
+  const queries = buildQueries(params);
 
-  for (const srcRef of pb.discovery.sources) {
-    const source = getSource(srcRef.key);
-    for (const tpl of pb.discovery.queryTemplates) {
-      const text = interpolate(tpl, params);
-      for await (const raw of source.discover({ text, limit: maxLeads, params })) {
-        const domainKey = normDomain(raw.website);
-        const phoneKey = normPhone(raw.phone);
+  if (index >= queries.length) {
+    console.log(`[discover] ${campaignId} complete — ${queries.length} queries processed`);
+    if (params.recurring === true) {
+      await boss.send(JOBS.discover, { campaignId }, { startAfter: 24 * 3600 });
+      console.log(`[discover] ${campaignId} recurring — next scan in 24h`);
+    }
+    return;
+  }
 
-        // Dedupe within the campaign on domain or phone (when present).
-        const keyFilters = [
-          domainKey ? { domainKey } : null,
-          phoneKey ? { phoneKey } : null,
-        ].filter(Boolean) as Prisma.LeadWhereInput[];
-        if (keyFilters.length) {
-          const dupe = await prisma.lead.findFirst({
-            where: { campaignId, OR: keyFilters },
-            select: { id: true },
-          });
-          if (dupe) continue;
-        }
+  const perQuery = typeof params.maxLeads === "number" ? params.maxLeads : 60;
+  const source = getSource(pb.discovery.sources[0].key);
+  const text = queries[index];
+  let created = 0;
 
-        try {
-          const lead = await prisma.lead.create({
-            data: {
-              campaignId,
-              businessName: raw.businessName,
-              website: raw.website,
-              email: raw.email,
-              phone: raw.phone,
-              address: raw.address,
-              category: raw.category,
-              domainKey,
-              phoneKey,
-              attributes: (raw.attributes ?? {}) as Prisma.InputJsonValue,
-            },
-          });
-          await boss.send(JOBS.analyze, { leadId: lead.id });
-        } catch {
-          // unique constraint => duplicate; skip (dedupe).
-        }
-      }
+  for await (const raw of source.discover({ text, limit: perQuery, params })) {
+    const domainKey = normDomain(raw.website);
+    const phoneKey = normPhone(raw.phone);
+
+    // Dedupe within the campaign on domain or phone (when present).
+    const keyFilters = [
+      domainKey ? { domainKey } : null,
+      phoneKey ? { phoneKey } : null,
+    ].filter(Boolean) as Prisma.LeadWhereInput[];
+    if (keyFilters.length) {
+      const dupe = await prisma.lead.findFirst({ where: { campaignId, OR: keyFilters }, select: { id: true } });
+      if (dupe) continue;
+    }
+
+    try {
+      const lead = await prisma.lead.create({
+        data: {
+          campaignId,
+          businessName: raw.businessName,
+          website: raw.website,
+          email: raw.email,
+          phone: raw.phone,
+          address: raw.address,
+          category: raw.category,
+          domainKey,
+          phoneKey,
+          attributes: (raw.attributes ?? {}) as Prisma.InputJsonValue,
+        },
+      });
+      await boss.send(JOBS.analyze, { leadId: lead.id });
+      created++;
+    } catch {
+      // unique constraint => duplicate (race); skip.
     }
   }
+
+  console.log(`[discover] ${campaignId} q${index + 1}/${queries.length} "${text}" -> ${created} new leads`);
+  // Advance to the next query (paced) — this is what keeps it running continuously.
+  await boss.send(JOBS.discoverQuery, { campaignId, index: index + 1 }, { startAfter: 4 });
 }
 
 async function analyze(boss: PgBoss, leadId: string) {
@@ -275,8 +315,13 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   // pg-boss v10 requires queues to exist before send/work. createQueue is idempotent.
   for (const name of Object.values(JOBS)) await boss.createQueue(name);
 
-  // Discovery: one job per campaign; it fans out into per-lead jobs.
+  // Discovery: discover() kicks the chain; discoverQuery processes one query then
+  // enqueues the next (serial by default batch size, so queries are paced in order).
   await boss.work<{ campaignId: string }>(JOBS.discover, parallel((d) => discover(boss, d.campaignId)));
+  await boss.work<{ campaignId: string; index: number }>(
+    JOBS.discoverQuery,
+    parallel((d) => discoverQuery(boss, d.campaignId, d.index)),
+  );
 
   // Per-lead steps: process up to 10 leads at once (these do the network I/O).
   const batch = { batchSize: 10 };

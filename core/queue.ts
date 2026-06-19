@@ -22,6 +22,7 @@ export async function getBoss(): Promise<PgBoss> {
 // Job names — one per pipeline step. See PLAN.md §5.
 export const JOBS = {
   discover: "discover",
+  discoverQuery: "discover-query",
   analyze: "analyze",
   score: "score",
   personalize: "personalize",

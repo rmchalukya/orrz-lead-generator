@@ -12,12 +12,19 @@ export async function createCampaign(formData: FormData) {
   const playbookKey = String(formData.get("playbookKey") || "website-sales");
   const pb = getPlaybook(playbookKey);
 
+  const areas = String(formData.get("areas") || "")
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   const params = {
     businessType: String(formData.get("businessType") || "").trim(),
     city: String(formData.get("city") || "").trim(),
     state: String(formData.get("state") || "").trim(),
     country: String(formData.get("country") || "").trim(),
-    maxLeads: Math.max(1, Math.min(200, Number(formData.get("maxLeads") || 25))),
+    areas, // each becomes its own Google query — more areas = more leads
+    maxLeads: Math.max(1, Math.min(60, Number(formData.get("maxLeads") || 60))), // per query
+    recurring: formData.get("recurring") === "on", // re-scan every 24h
     liveSend: formData.get("liveSend") === "on", // unchecked = safe (no real sends)
   };
   const name = String(formData.get("name") || `${params.businessType} in ${params.city}`).trim();

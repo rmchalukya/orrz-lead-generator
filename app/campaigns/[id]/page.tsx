@@ -17,6 +17,8 @@ export default async function CampaignDetail({ params }: { params: Promise<{ id:
 
   const p = campaign.params as Record<string, unknown>;
   const liveSend = p.liveSend === true;
+  const areaCount = Array.isArray(p.areas) ? p.areas.length : 0;
+  const recurring = p.recurring === true;
   const leads = [...campaign.leads].sort((a, b) => (b.score?.score ?? -1) - (a.score?.score ?? -1));
   const qualified = leads.filter((l) => l.score && l.score.band !== "EXCLUDE").length;
   const withEmail = leads.filter((l) => l.email).length;
@@ -28,8 +30,10 @@ export default async function CampaignDetail({ params }: { params: Promise<{ id:
       </p>
       <h1>{campaign.name}</h1>
       <p className="muted">
-        {String(p.businessType)} · {String(p.city)} {String(p.state)} {String(p.country)} · cap{" "}
-        {String(p.maxLeads ?? "—")} · <span className={`badge ${campaign.status.toLowerCase()}`}>{campaign.status}</span>
+        {String(p.businessType)} · {String(p.city)} {String(p.state)} {String(p.country)} ·{" "}
+        {areaCount > 0 ? `${areaCount} areas · ` : ""}
+        {String(p.maxLeads ?? 60)}/query · {recurring ? "re-scans 24h · " : ""}
+        <span className={`badge ${campaign.status.toLowerCase()}`}>{campaign.status}</span>
       </p>
 
       <div className="actions">
