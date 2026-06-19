@@ -28,11 +28,12 @@ export async function discoverEmail(website: string): Promise<string | null> {
     return null;
   }
 
-  // Homepage first, then the usual contact pages.
-  for (const path of ["", "/contact", "/contact-us", "/about", "/about-us"]) {
+  // Homepage first, then the most common contact page. Kept short so a site with
+  // no email anywhere can't stall the pipeline (most emails are on the homepage).
+  for (const path of ["", "/contact", "/contact-us"]) {
     try {
       const url = new URL(path, website).toString();
-      const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(8000) });
+      const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(5000) });
       if (!res.ok) continue;
       const email = pickEmail(await res.text(), domain);
       if (email) return email;

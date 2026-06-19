@@ -260,12 +260,14 @@ async function sendTouch(_boss: PgBoss, stepId: string) {
 }
 
 // --- Register all step workers on pg-boss --------------------------------
-// pg-boss v10 hands the handler a batch (array) of jobs; process each in turn.
+// pg-boss v10 hands the handler a batch (array) of jobs. We run the batch
+// CONCURRENTLY (allSettled) so leads process in parallel and one failing lead
+// can't block — or stop — the rest of the run.
 type Job<T> = { data: T };
 
-function handler<T>(fn: (data: T) => Promise<void>) {
+function parallel<T>(fn: (data: T) => Promise<void>) {
   return async (jobs: Job<T>[]) => {
-    for (const job of jobs) await fn(job.data);
+    await Promise.allSettled(jobs.map((j) => fn(j.data)));
   };
 }
 
@@ -273,10 +275,16 @@ export async function registerWorkers(boss: PgBoss): Promise<void> {
   // pg-boss v10 requires queues to exist before send/work. createQueue is idempotent.
   for (const name of Object.values(JOBS)) await boss.createQueue(name);
 
-  await boss.work<{ campaignId: string }>(JOBS.discover, handler((d) => discover(boss, d.campaignId)));
-  await boss.work<{ leadId: string }>(JOBS.analyze, handler((d) => analyze(boss, d.leadId)));
-  await boss.work<{ leadId: string }>(JOBS.score, handler((d) => scoreStep(boss, d.leadId)));
-  await boss.work<{ leadId: string }>(JOBS.personalize, handler((d) => personalizeStep(boss, d.leadId)));
-  await boss.work<{ leadId: string }>(JOBS.buildSequence, handler((d) => buildSequence(boss, d.leadId)));
-  await boss.work<{ stepId: string }>(JOBS.sendTouch, handler((d) => sendTouch(boss, d.stepId)));
+  // Discovery: one job per campaign; it fans out into per-lead jobs.
+  await boss.work<{ campaignId: string }>(JOBS.discover, parallel((d) => discover(boss, d.campaignId)));
+
+  // Per-lead steps: process up to 10 leads at once (these do the network I/O).
+  const batch = { batchSize: 10 };
+  await boss.work<{ leadId: string }>(JOBS.analyze, batch, parallel((d) => analyze(boss, d.leadId)));
+  await boss.work<{ leadId: string }>(JOBS.score, batch, parallel((d) => scoreStep(boss, d.leadId)));
+  await boss.work<{ leadId: string }>(JOBS.personalize, batch, parallel((d) => personalizeStep(boss, d.leadId)));
+  await boss.work<{ leadId: string }>(JOBS.buildSequence, batch, parallel((d) => buildSequence(boss, d.leadId)));
+
+  // Sends: modest concurrency to avoid bursting the email provider / hurting deliverability.
+  await boss.work<{ stepId: string }>(JOBS.sendTouch, { batchSize: 5 }, parallel((d) => sendTouch(boss, d.stepId)));
 }
