@@ -1,3 +1,4 @@
+import "./env.js"; // must run before PrismaClient is constructed
 import { PrismaClient } from "@prisma/client";
 
 // Single Prisma instance, reused across hot-reloads in dev.

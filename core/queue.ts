@@ -1,3 +1,4 @@
+import "./env.js"; // resolve DATABASE_URL before reading it below
 import PgBoss from "pg-boss";
 
 // pg-boss runs on the same Postgres as the app — no Redis. See PLAN.md §3.
